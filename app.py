@@ -5,7 +5,6 @@ from io import BytesIO
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A5
 from reportlab.lib.utils import ImageReader
-from concurrent.futures import ThreadPoolExecutor
 import os
 
 # Page config
@@ -35,8 +34,12 @@ st.divider()
 
 uploaded_file = st.file_uploader("📁 Upload your PDF file", type="pdf", help="Only PDF format is supported")
 
-def process_page(page_index, page_data):
-    page = page_data.load_page(page_index)
+@st.cache_resource
+def load_pdf(file_bytes):
+    return fitz.open(stream=file_bytes, filetype="pdf")
+
+def process_page(page_index, pdf_doc):
+    page = pdf_doc.load_page(page_index)
     pix = page.get_pixmap(dpi=dpi)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
@@ -49,7 +52,7 @@ def process_page(page_index, page_data):
             half = half.rotate(rotation_angle, expand=True)
 
         img_buf = BytesIO()
-        half.save(img_buf, format='JPEG', quality=95)
+        half.save(img_buf, format='JPEG', quality=85)
         img_buf.seek(0)
 
         inch_width = page_width / 72
@@ -64,34 +67,35 @@ def process_page(page_index, page_data):
     return processed_halves
 
 if uploaded_file:
-    # Extract input filename for use in download
     base_name = os.path.splitext(uploaded_file.name)[0]
     output_filename = f"{base_name}_split.pdf"
 
     with st.spinner("⏳ Splitting, rotating, and formatting your PDF..."):
-        pdf_reader = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-
-        with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(process_page, i, pdf_reader) for i in range(len(pdf_reader))]
-            results = [f.result() for f in futures]
+        pdf_reader = load_pdf(uploaded_file.read())
+        total_pages = len(pdf_reader)
 
         output_pdf_stream = BytesIO()
         c = canvas.Canvas(output_pdf_stream, pagesize=page_size)
         preview_images = []
 
-        for halves in results:
+        for i in range(total_pages):
+            halves = process_page(i, pdf_reader)
             for img_buf, y_offset, display_height in halves:
                 c.drawImage(ImageReader(img_buf), 0, y_offset, width=page_width, height=display_height)
                 c.showPage()
-                img_buf.seek(0)
-                preview_images.append(Image.open(img_buf).copy())
+
+                # Save low-res copy for preview (only first few)
+                if len(preview_images) < MAX_PREVIEW:
+                    img_buf.seek(0)
+                    preview_img = Image.open(img_buf).copy()
+                    preview_img.thumbnail((300, 300))
+                    preview_images.append(preview_img)
 
         c.save()
         output_pdf_stream.seek(0)
 
     st.success("✅ Your PDF has been processed and is ready to download!")
 
-    # Download button with dynamic file name
     st.download_button(
         label="📥 Download Final PDF",
         data=output_pdf_stream,
@@ -100,11 +104,10 @@ if uploaded_file:
     )
 
     st.markdown("---")
-
     st.markdown("### 🔍 Preview of Split Pages")
 
-    for i, img in enumerate(preview_images[:MAX_PREVIEW]):
+    for i, img in enumerate(preview_images):
         st.image(img, caption=f"Page {i + 1}", use_container_width=True)
 
-    if len(preview_images) > MAX_PREVIEW:
-        st.info(f"Showing only the first {MAX_PREVIEW} preview pages for performance.")
+    if len(preview_images) == MAX_PREVIEW:
+        st.info(f"Showing only the first {MAX_PREVIEW} preview pages to conserve memory.")
